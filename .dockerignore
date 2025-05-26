@@ -1,0 +1,13 @@
+.git
+.gitignore
+README.md
+CLAUDE.md
+LICENSE
+spec/
+.rspec
+coverage/
+tmp/
+log/
+.bundle/
+vendor/bundle/
+.env*
