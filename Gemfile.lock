@@ -1,22 +1,15 @@
 GEM
   remote: https://rubygems.org/
   specs:
-    base64 (0.2.0)
     benchmark-ips (2.14.0)
-    concurrent-ruby (1.3.5)
     diff-lcs (1.6.2)
     json (2.7.6)
-    mustermann (3.0.3)
-      ruby2_keywords (~> 0.0.1)
     net-http (0.6.0)
       uri
     nio4r (2.7.4)
     puma (6.6.0)
       nio4r (~> 2.0)
     rack (2.2.16)
-    rack-protection (3.2.0)
-      base64 (>= 0.1.0)
-      rack (~> 2.2, >= 2.2.4)
     rack-test (2.2.0)
       rack (>= 1.3)
     rspec (3.13.0)
@@ -32,13 +25,6 @@ GEM
       diff-lcs (>= 1.2.0, < 2.0)
       rspec-support (~> 3.13.0)
     rspec-support (3.13.3)
-    ruby2_keywords (0.0.5)
-    sinatra (3.2.0)
-      mustermann (~> 3.0)
-      rack (~> 2.2, >= 2.2.4)
-      rack-protection (= 3.2.0)
-      tilt (~> 2.0)
-    tilt (2.6.0)
     uri (1.0.3)
 
 PLATFORMS
@@ -46,13 +32,11 @@ PLATFORMS
 
 DEPENDENCIES
   benchmark-ips (~> 2.13)
-  concurrent-ruby (~> 1.2)
   json
   net-http
   puma (~> 6.4)
   rack-test (~> 2.1)
   rspec (~> 3.13)
-  sinatra (~> 3.2)
 
 BUNDLED WITH
    1.17.2

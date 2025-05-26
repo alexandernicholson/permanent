@@ -1,156 +1,192 @@
-require 'sinatra/base'
 require 'set'
-require 'net/http'
-require 'uri'
 require 'json'
-require 'fileutils'
 require 'logger'
+require 'thread'
 
-class DisposableEmailChecker < Sinatra::Base
-  configure do
-    set :server, :puma
-    set :logging, false
-    set :static, false
-    set :sessions, false
-    set :protection, false
-    set :x_cascade, false
-    
-    enable :reloader if development?
-  end
+# Fast Rack application with async logging
+class DisposableEmailCheckerFast
+  DOMAINS_FILE = File.join(__dir__, 'sources', 'disposable-email-domains', 'domains.txt')
+  
+  # Pre-serialized JSON responses
+  ERROR_EMAIL_REQUIRED = '{"error":"Email parameter required"}'.freeze
+  ERROR_INVALID_FORMAT = '{"error":"Invalid email format"}'.freeze
+  ERROR_NOT_FOUND = '{"error":"Not found"}'.freeze
+  
+  DISPOSABLE_TRUE = '{"disposable":true}'.freeze
+  DISPOSABLE_FALSE = '{"disposable":false}'.freeze
+  
+  # Headers
+  CONTENT_TYPE_JSON = { 'Content-Type' => 'application/json' }.freeze
   
   # Custom lightweight logger for performance
-  class RequestLogger
+  class AsyncLogger
     def initialize
-      @logger = Logger.new(STDOUT)
-      @logger.formatter = proc do |severity, datetime, progname, msg|
-        "#{datetime.strftime('%Y-%m-%d %H:%M:%S')} #{msg}\n"
-      end
+      @queue = Queue.new
+      @queue_max = 10000
+      @buffer = []
+      @buffer_size = 100
+      @mutex = Mutex.new
+      
+      # Direct IO without Logger overhead
+      @output = STDOUT
+      @output.sync = true
+      
+      start_logger_thread
     end
     
-    def log_request(env, status, domain = nil)
-      method = env['REQUEST_METHOD']
-      path = env['PATH_INFO']
-      query = env['QUERY_STRING']
-      ip = env['HTTP_X_FORWARDED_FOR'] || env['REMOTE_ADDR']
+    def start_logger_thread
+      # Start background logging thread with batch processing
+      @thread = Thread.new do
+        loop do
+          begin
+            # Batch process entries for efficiency
+            entries = []
+            
+            # Collect up to buffer_size entries
+            @buffer_size.times do
+              entry = @queue.pop(true) rescue nil
+              break unless entry
+              entries << entry
+            end
+            
+            # If no entries collected, wait for one
+            if entries.empty?
+              entry = @queue.pop
+              entries << entry
+            end
+            
+            # Write all entries at once
+            unless entries.empty?
+              timestamp = Time.now.strftime('%Y-%m-%d %H:%M:%S')
+              entries.each do |e|
+                @output.puts "#{timestamp} #{e}"
+              end
+            end
+          rescue => e
+            # Silently ignore logging errors
+          end
+        end
+      end
+      @thread.priority = -2 # Even lower priority
+    end
+    
+    def log_request(method, path, ip, status, domain = nil)
+      # Ultra-fast non-blocking add
+      return if @queue.size >= @queue_max
       
-      domain_part = domain ? " domain=#{domain}" : ""
-      @logger.info "#{method} #{path} ip=#{ip} status=#{status}#{domain_part}"
+      # Pre-formatted string without allocations
+      entry = domain ? "#{method} #{path} ip=#{ip} status=#{status} domain=#{domain}" : 
+                      "#{method} #{path} ip=#{ip} status=#{status}"
+      
+      @queue << entry rescue nil
     end
   end
   
-  @@logger = RequestLogger.new
-
-  DOMAINS_FILE = File.join(__dir__, 'sources', 'disposable-email-domains', 'domains.txt')
-  DOMAINS_URL = 'https://raw.githubusercontent.com/disposable/disposable-email-domains/master/domains.txt'
-  UPDATE_INTERVAL = 3600
+  def initialize
+    @domains = load_domains
+    @last_update = Time.now.to_i
+    @domains_size = @domains.size
+    
+    # Logger will be initialized on first request in each worker
+    @logger = nil
+    
+    # Pre-build health response
+    @health_response = "{\"status\":\"ok\",\"domains_loaded\":#{@domains_size},\"last_update\":#{@last_update}}"
+  end
   
-  @@domains = Set.new
-  @@last_update = 0
-  @@update_mutex = Mutex.new
-  
-  def self.load_domains_from_file
+  def load_domains
+    domains = Set.new
     if File.exist?(DOMAINS_FILE)
-      domains = Set.new
       File.foreach(DOMAINS_FILE) do |line|
         domain = line.strip.downcase
         domains.add(domain) unless domain.empty?
       end
-      domains
+    end
+    domains
+  end
+  
+  def call(env)
+    # Initialize logger on first request if needed (once per worker)
+    if @logger.nil? && ENV['DISABLE_LOGGING'] != 'true'
+      @logger = AsyncLogger.new
+    end
+    
+    path = env['PATH_INFO']
+    
+    case path
+    when '/check'
+      handle_check(env)
+    when '/health'
+      if @logger
+        method = env['REQUEST_METHOD']
+        ip = env['HTTP_X_FORWARDED_FOR'] || env['REMOTE_ADDR']
+        @logger.log_request(method, path, ip, 200)
+      end
+      [200, CONTENT_TYPE_JSON, [@health_response]]
     else
-      Set.new
+      [404, CONTENT_TYPE_JSON, [ERROR_NOT_FOUND]]
     end
   end
   
-  def self.update_domains_from_url
-    begin
-      uri = URI(DOMAINS_URL)
-      response = Net::HTTP.get_response(uri)
+  private
+  
+  def handle_check(env)
+    query_string = env['QUERY_STRING']
+    
+    # Fast path for successful requests (most common case)
+    if query_string && !query_string.empty?
+      # Simple parameter extraction
+      params = parse_query(query_string)
+      email = params['email']
       
-      if response.code == '200'
-        domains = Set.new
-        response.body.each_line do |line|
-          domain = line.strip.downcase
-          domains.add(domain) unless domain.empty?
+      if email
+        # Find @ position
+        at_pos = email.index('@')
+        if at_pos && at_pos > 0 && at_pos < email.length - 1
+          # Extract domain
+          domain = email[(at_pos + 1)..-1].downcase
+          
+          # Check if disposable
+          response_body = @domains.include?(domain) ? DISPOSABLE_TRUE : DISPOSABLE_FALSE
+          
+          # Log successful request
+          @logger.log_request('GET', '/check', env['REMOTE_ADDR'], 200, domain) if @logger
+          
+          return [200, CONTENT_TYPE_JSON, [response_body]]
         end
-        
-        FileUtils.mkdir_p(File.dirname(DOMAINS_FILE))
-        File.write(DOMAINS_FILE, response.body)
-        
-        domains
+      end
+    end
+    
+    # Slow path for error cases
+    if @logger
+      method = env['REQUEST_METHOD']
+      ip = env['HTTP_X_FORWARDED_FOR'] || env['REMOTE_ADDR']
+      
+      if query_string.nil? || query_string.empty?
+        @logger.log_request(method, '/check', ip, 400)
+        return [400, CONTENT_TYPE_JSON, [ERROR_EMAIL_REQUIRED]]
+      elsif !params || !params['email']
+        @logger.log_request(method, '/check', ip, 400)
+        return [400, CONTENT_TYPE_JSON, [ERROR_EMAIL_REQUIRED]]
       else
-        nil
+        @logger.log_request(method, '/check', ip, 400)
+        return [400, CONTENT_TYPE_JSON, [ERROR_INVALID_FORMAT]]
       end
-    rescue => e
-      nil
-    end
-  end
-  
-  def self.update_domains_if_needed
-    current_time = Time.now.to_i
-    
-    return unless current_time - @@last_update > UPDATE_INTERVAL
-    
-    @@update_mutex.synchronize do
-      return unless current_time - @@last_update > UPDATE_INTERVAL
-      
-      updated_domains = update_domains_from_url
-      
-      if updated_domains && !updated_domains.empty?
-        @@domains = updated_domains
-      elsif @@domains.empty?
-        @@domains = load_domains_from_file
+    else
+      if query_string.nil? || query_string.empty? || !params || !params['email']
+        return [400, CONTENT_TYPE_JSON, [ERROR_EMAIL_REQUIRED]]
+      else
+        return [400, CONTENT_TYPE_JSON, [ERROR_INVALID_FORMAT]]
       end
-      
-      @@last_update = current_time
     end
   end
   
-  @@domains = load_domains_from_file
-  @@last_update = Time.now.to_i
-  
-  Thread.new do
-    loop do
-      sleep(UPDATE_INTERVAL)
-      update_domains_if_needed
+  def parse_query(query_string)
+    params = {}
+    query_string.split('&').each do |pair|
+      key, value = pair.split('=', 2)
+      params[key] = value if key && value
     end
+    params
   end
-  
-  before do
-    content_type :json
-  end
-  
-  get '/check' do
-    email = params['email']
-    
-    unless email
-      @@logger.log_request(env, 400)
-      return [400, { error: 'Email parameter required' }.to_json]
-    end
-    
-    parts = email.split('@')
-    unless parts.length == 2
-      @@logger.log_request(env, 400)
-      return [400, { error: 'Invalid email format' }.to_json]
-    end
-    
-    domain = parts[1].downcase
-    
-    is_disposable = @@domains.include?(domain)
-    
-    @@logger.log_request(env, 200, domain)
-    
-    { disposable: is_disposable }.to_json
-  end
-  
-  get '/health' do
-    @@logger.log_request(env, 200)
-    
-    {
-      status: 'ok',
-      domains_loaded: @@domains.size,
-      last_update: @@last_update
-    }.to_json
-  end
-  
-  run! if app_file == $0
 end

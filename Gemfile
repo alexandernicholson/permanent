@@ -1,10 +1,8 @@
 source 'https://rubygems.org'
 
-gem 'sinatra', '~> 3.2'
 gem 'puma', '~> 6.4'
 gem 'net-http'
 gem 'json'
-gem 'concurrent-ruby', '~> 1.2'
 
 group :development, :test do
   gem 'rspec', '~> 3.13'

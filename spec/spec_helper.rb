@@ -8,7 +8,7 @@ module RSpecMixin
   include Rack::Test::Methods
 
   def app
-    DisposableEmailChecker
+    @app ||= DisposableEmailCheckerFast.new
   end
 end
 
