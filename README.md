@@ -5,6 +5,7 @@ A blazing-fast disposable email check API built with Ruby and Sinatra, capable o
 ## Features
 
 - **High Performance**: Optimized for 120,000+ RPS using Set data structure for O(1) lookups
+- **Request Logging**: Efficient logging with domain-only privacy protection
 - **Auto-updating**: Automatically fetches and updates disposable domain lists
 - **Containerized**: Docker-ready for easy deployment
 - **Well-tested**: Comprehensive test suite with RSpec

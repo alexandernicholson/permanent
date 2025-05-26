@@ -4,6 +4,7 @@ require 'net/http'
 require 'uri'
 require 'json'
 require 'fileutils'
+require 'logger'
 
 class DisposableEmailChecker < Sinatra::Base
   configure do
@@ -16,6 +17,28 @@ class DisposableEmailChecker < Sinatra::Base
     
     enable :reloader if development?
   end
+  
+  # Custom lightweight logger for performance
+  class RequestLogger
+    def initialize
+      @logger = Logger.new(STDOUT)
+      @logger.formatter = proc do |severity, datetime, progname, msg|
+        "#{datetime.strftime('%Y-%m-%d %H:%M:%S')} #{msg}\n"
+      end
+    end
+    
+    def log_request(env, status, domain = nil)
+      method = env['REQUEST_METHOD']
+      path = env['PATH_INFO']
+      query = env['QUERY_STRING']
+      ip = env['HTTP_X_FORWARDED_FOR'] || env['REMOTE_ADDR']
+      
+      domain_part = domain ? " domain=#{domain}" : ""
+      @logger.info "#{method} #{path} ip=#{ip} status=#{status}#{domain_part}"
+    end
+  end
+  
+  @@logger = RequestLogger.new
 
   DOMAINS_FILE = File.join(__dir__, 'sources', 'disposable-email-domains', 'domains.txt')
   DOMAINS_URL = 'https://raw.githubusercontent.com/disposable/disposable-email-domains/master/domains.txt'
@@ -99,19 +122,29 @@ class DisposableEmailChecker < Sinatra::Base
   get '/check' do
     email = params['email']
     
-    return [400, { error: 'Email parameter required' }.to_json] unless email
+    unless email
+      @@logger.log_request(env, 400)
+      return [400, { error: 'Email parameter required' }.to_json]
+    end
     
     parts = email.split('@')
-    return [400, { error: 'Invalid email format' }.to_json] unless parts.length == 2
+    unless parts.length == 2
+      @@logger.log_request(env, 400)
+      return [400, { error: 'Invalid email format' }.to_json]
+    end
     
     domain = parts[1].downcase
     
     is_disposable = @@domains.include?(domain)
     
+    @@logger.log_request(env, 200, domain)
+    
     { disposable: is_disposable }.to_json
   end
   
   get '/health' do
+    @@logger.log_request(env, 200)
+    
     {
       status: 'ok',
       domains_loaded: @@domains.size,
